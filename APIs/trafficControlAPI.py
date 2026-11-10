@@ -4,7 +4,7 @@ Traffic Control Agent - Stop Light API (demo)
 
 1. <Light Location: List>  getAllValues()
    Locations of Dublin City Council traffic signals (SCATS sites), loaded from
-   static/dcc-traffic-scats-signals-google-maps-1.csv
+   static/TrafficLightLocations (CSV)
    (https://data.smartdublin.ie/dataset/traffic-signals-and-scats-sites-locations-dcc)
 
 2. <Light Status: List>  setLightStatus([(location, status), ...])
@@ -55,7 +55,7 @@ from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-CSV_PATH = Path(__file__).resolve().parent.parent / "static" / "dcc-traffic-scats-signals-google-maps-1.csv"
+CSV_PATH = Path(__file__).resolve().parent.parent / "static" / "TrafficLightLocations"
 
 STATES = ("green", "amber", "red")
 # Normal automatic cycle, in seconds
