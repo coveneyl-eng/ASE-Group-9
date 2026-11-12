@@ -1,0 +1,10 @@
+geopandas
+pyogrio
+psycopg[binary]
+sqlalchemy
+geoalchemy2
+httpx
+paho-mqtt>=2
+confluent-kafka
+rasterio
+pandas
