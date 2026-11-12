@@ -1,1 +1,2 @@
-This folder contains files with scripts to retrieve api information
+This folder contains API clients. See [Notification/README.md](Notification/README.md)
+for setup and usage instructions for the SMSAPI and Gmail notification clients.
