@@ -3,7 +3,7 @@ pyogrio
 psycopg[binary]
 sqlalchemy
 geoalchemy2
-httpx
+requests
 paho-mqtt>=2
 confluent-kafka
 rasterio

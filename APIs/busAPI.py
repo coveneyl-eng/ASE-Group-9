@@ -46,3 +46,32 @@ def BusAlertsQuery():
     except requests.exceptions.RequestException as e:
         print(f"An error occurred: {e}")
         return None
+
+def BusTripUpdatesQuery():
+    ## returns realtime trip updates (delays, cancellations) as JSON text
+    api_url = "https://api.nationaltransport.ie/gtfsr/v2/TripUpdates"
+    headers = {"x-api-key": API_KEY}
+    params = {"format": "json"}
+
+    try:
+        response = requests.get(api_url, headers=headers, params=params)
+        response.raise_for_status()
+        return response.text
+    except requests.exceptions.RequestException as e:
+        print(f"An error occurred: {e}")
+        return None
+
+def DublinBusTimetableDownload(path):
+    ## downloads the static Dublin Bus GTFS timetable (stops, routes, trips) zip to path
+    api_url = "https://www.transportforireland.ie/transitData/Data/GTFS_Dublin_Bus.zip"
+
+    try:
+        with requests.get(api_url, stream=True, timeout=180) as response:
+            response.raise_for_status()
+            with open(path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=1 << 20):
+                    f.write(chunk)
+        return path
+    except requests.exceptions.RequestException as e:
+        print(f"An error occurred: {e}")
+        return None
