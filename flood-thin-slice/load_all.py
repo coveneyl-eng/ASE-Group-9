@@ -3,13 +3,18 @@ water level reading through MQTT -> Kafka, then list infrastructure in the flood
 
     docker compose up -d
     pip install -r requirements.txt
-    python load_all.py                  # NTA_API_KEY=... for GTFS-Realtime, SIM_LEVEL=2.9 to force a reading
+    python load_all.py                  # SIM_LEVEL=2.9 to force a reading
+
+Every call to an outside service lives in ../APIs (opwAPI, marineTideAPI, metEireannAPI,
+busAPI, gsiLidarAPI, osmAPI, csoAPI). This file only shapes the data and loads it into PostGIS.
 """
-import io, json, os, time, uuid, zipfile, datetime as dt
+import io, json, os, sys, time, uuid, zipfile, datetime as dt
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import httpx
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "APIs"))
+import busAPI, csoAPI, gsiLidarAPI, marineTideAPI, metEireannAPI, opwAPI, osmAPI
+
 import pandas as pd
 import geopandas as gpd
 from shapely.geometry import box, Point, LineString, Polygon
@@ -25,28 +30,7 @@ ITM = 2157                                        # Irish Transverse Mercator, m
 DUBLIN = gpd.GeoSeries([box(W, S, E, N)], crs=4326)
 DUBLIN_PORT = Point(-6.2217, 53.3457)             # Marine Institute tide gauge
 
-OPW_S3 = "https://s3.eu-west-1.amazonaws.com/catalogue.floodinfo.opw"
-URLS = {
-    "opw_latest": "http://waterlevel.ie/geojson/latest/",
-    "erddap": "https://erddap.marine.ie/erddap/tabledap/IrishNationalTideGaugeNetwork.json",
-    "met_warnings": "https://www.met.ie/Open_Data/json/warning_IRELAND.json",
-    "met_forecast": "http://openaccess.pf.api.met.ie/metno-wdb2ts/locationforecast?lat=53.35;long=-6.26",
-    "gtfs_static": "https://www.transportforireland.ie/transitData/Data/GTFS_Dublin_Bus.zip",
-    "gtfsr": "https://api.nationaltransport.ie/gtfsr/v2/TripUpdates?format=json",
-    "cfram_nodes": f"{OPW_S3}/cfram/esds_nodes_current.zip",
-    "cfram_river": f"{OPW_S3}/cfram/esds_floodmap_ext_f_c.zip",
-    "cfram_coast": f"{OPW_S3}/cfram/esds_floodmap_ext_c_c.zip",
-    "icwws": "https://s3-eu-west-1.amazonaws.com/catalogue.floodinfo.opw/"
-             "icwws-2018-phase1-national-coastal-extreme-water-level-estimation-points-itm-osgm15.csv",
-    "lidar": "https://gsi.geodata.gov.ie/server/rest/services/Lidar/IE_GSI_LiDAR_Coverage_NYU_Dublin_IE26_ITM/FeatureServer/4/query",
-    "overpass": "https://overpass-api.de/api/interpreter",
-    "cso_ckan": "https://data.gov.ie/api/3/action/package_show?id="
-                "cso-small-areas-national-statistical-boundaries-2022-generalised-20m",
-    "cso_saps": "https://www.cso.ie/en/media/csoie/census/census2022/SAPS_2022_Small_Area_UR_171024.csv",
-}
-
 db = create_engine(DB_URL)
-http = httpx.Client(timeout=float(os.getenv("HTTP_TIMEOUT", "180")), follow_redirects=True, headers={"User-Agent": "dublin-flood-thin-slice"})
 status = {}
 
 
@@ -63,24 +47,18 @@ def source(name):
     return wrap
 
 
-def patient(method, url, tries=8, **kw):
-    """Retry while the server says 'busy' or 'still generating' (Overpass 429/5xx, ArcGIS Hub 202)."""
-    for i in range(tries):
-        r = http.request(method, url, **kw)
-        if r.status_code not in (202, 429, 502, 503, 504):
-            return r.raise_for_status()
-        time.sleep(min(5 * 2 ** i, 120))
-    return r.raise_for_status()
+def need(data, what):
+    """The APIs modules print the error and return None on failure; turn that into a FAIL line."""
+    if data is None:
+        raise RuntimeError(f"{what} request failed (see message above)")
+    return data
 
 
-def cached(url, name):
+def cached(download, name, *args):
+    """Download a big file once into data/, using one of the APIs download functions."""
     path = CACHE / name
     if not path.exists():
-        with http.stream("GET", url) as r:
-            r.raise_for_status()
-            with open(path, "wb") as f:
-                for chunk in r.iter_bytes():
-                    f.write(chunk)
+        need(download(*args, path), name)
     return path
 
 
@@ -109,7 +87,7 @@ def setup_db():
 
 @source("opw_waterlevel")
 def load_opw():
-    gdf = gpd.read_file(io.BytesIO(http.get(URLS["opw_latest"], params={"t": int(time.time())}).content))
+    gdf = gpd.read_file(io.BytesIO(need(opwAPI.latestWaterLevels(), "OPW water levels")))
     gdf = gdf.clip(DUBLIN.to_crs(gdf.crs))
     for r in gdf[gdf.value.notna()].itertuples():
         save_reading("opw", f"{r.station_ref}_{r.sensor_ref}", float(r.value), r.datetime)
@@ -118,8 +96,7 @@ def load_opw():
 
 @source("marine_tide_gauges")
 def load_tides():
-    q = 'time,station_id,latitude,longitude,Water_Level_OD_Malin,QC_Flag&station_id=~"Dublin Port|Howth.*"&time>=now-2hours'
-    t = http.get(f"{URLS['erddap']}?{q}").json()["table"]
+    t = need(marineTideAPI.tideGaugeReadings("Dublin Port|Howth.*", hours=2), "Marine Institute tide gauges")
     df = pd.DataFrame(t["rows"], columns=t["columnNames"])
     df = df[df.QC_Flag.astype(str) != "9"]  # 9 = missing; live rows are 0 (not yet QC'd), 1 = good
     for r in df.itertuples():
@@ -130,14 +107,14 @@ def load_tides():
 
 @source("met_warnings")
 def load_warnings():
-    warnings = http.get(URLS["met_warnings"]).json()
+    warnings = need(metEireannAPI.weatherWarnings(), "Met Eireann warnings")
     pd.DataFrame({"raw": [json.dumps(w) for w in warnings]}).to_sql("met_warnings", db, if_exists="replace", index=False)
     return f"{len(warnings)} active warnings -> met_warnings"
 
 
 @source("met_point_forecast")
 def load_forecast():
-    root = ET.fromstring(http.get(URLS["met_forecast"]).content)
+    root = ET.fromstring(need(metEireannAPI.pointForecast(53.35, -6.26), "Met Eireann forecast"))
     rows = [(t.get("from"), t.get("to"), float(p.get("value")))
             for t in root.iter("time") for p in t.iter("precipitation")]
     pd.DataFrame(rows, columns=["from", "to", "precip_mm"]).to_sql("met_forecast", db, if_exists="replace", index=False)
@@ -146,7 +123,7 @@ def load_forecast():
 
 @source("nta_gtfs_static")
 def load_gtfs():
-    z = zipfile.ZipFile(cached(URLS["gtfs_static"], "gtfs_dublin_bus.zip"))
+    z = zipfile.ZipFile(cached(busAPI.DublinBusTimetableDownload, "gtfs_dublin_bus.zip"))
     stops = pd.read_csv(z.open("stops.txt"))
     gdf = gpd.GeoDataFrame(stops, geometry=gpd.points_from_xy(stops.stop_lon, stops.stop_lat), crs=4326).clip(DUBLIN)
     pd.read_csv(z.open("routes.txt")).to_sql("bus_routes", db, if_exists="replace", index=False)
@@ -155,8 +132,7 @@ def load_gtfs():
 
 @source("nta_gtfs_realtime")
 def load_gtfsr():
-    key = os.environ["NTA_API_KEY"]  # free key from developer.nationaltransport.ie
-    feed = http.get(URLS["gtfsr"], headers={"x-api-key": key}).json()
+    feed = json.loads(need(busAPI.BusTripUpdatesQuery(), "NTA GTFS-Realtime"))
     pd.DataFrame({"raw": [json.dumps(e) for e in feed["entity"]]}).to_sql("gtfsr_trip_updates", db, if_exists="replace", index=False)
     return f"{len(feed['entity'])} trip updates -> gtfsr_trip_updates"
 
@@ -165,13 +141,13 @@ def load_gtfsr():
 
 @source("cfram_nodes")
 def load_nodes():
-    path = cached(URLS["cfram_nodes"], "cfram_nodes.zip")
+    path = cached(opwAPI.downloadCframNodes, "cfram_nodes.zip")
     gdf = gpd.read_file(f"zip://{path}", bbox=DUBLIN)
     return to_db(gdf, "cfram_nodes")
 
 
-def load_extents(key, table):
-    path = cached(URLS[key], f"{key}.zip")
+def load_extents(download, key, table):
+    path = cached(download, f"{key}.zip")
     parts = []
     for shp in [n for n in zipfile.ZipFile(path).namelist() if n.endswith(".shp")]:
         gdf = gpd.read_file(f"zip://{path}!{shp}", bbox=DUBLIN)
@@ -180,13 +156,13 @@ def load_extents(key, table):
     return to_db(gpd.GeoDataFrame(pd.concat(parts), crs=parts[0].crs), table)
 
 
-load_river = source("cfram_river_extents")(lambda: load_extents("cfram_river", "flood_extent_river"))
-load_coast = source("cfram_coastal_extents")(lambda: load_extents("cfram_coast", "flood_extent_coast"))
+load_river = source("cfram_river_extents")(lambda: load_extents(opwAPI.downloadCframRiverExtents, "cfram_river", "flood_extent_river"))
+load_coast = source("cfram_coastal_extents")(lambda: load_extents(opwAPI.downloadCframCoastalExtents, "cfram_coast", "flood_extent_coast"))
 
 
 @source("icwws_coastal_levels")
 def load_icwws():
-    df = pd.read_csv(cached(URLS["icwws"], "icwws.csv"))
+    df = pd.read_csv(cached(opwAPI.downloadCoastalExtremeLevels, "icwws.csv"))
     df.columns = [c.replace("%", "pc").replace("+", "plus").replace(".", "_") for c in df.columns]
     gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.Easting, df.Northing), crs=ITM)
     return to_db(gdf.clip(DUBLIN.to_crs(ITM)), "icwws_points")
@@ -196,13 +172,12 @@ def load_icwws():
 def load_lidar():
     # NYU 2015 Dublin city LiDAR: four 1 m surface-model tiles (rooftops included), the only GSI LiDAR over the city.
     import rasterio
-    tiles = http.get(URLS["lidar"], params=dict(where="1=1", outFields="DATA_URL,DATA_NAME",
-                                                returnGeometry="false", f="json")).json()["features"]
+    tiles = need(gsiLidarAPI.lidarTiles(), "GSI LiDAR tile index")
     with db.begin() as c:
         c.execute(text("SET postgis.gdal_enabled_drivers = 'GTiff'"))
         c.execute(text("DROP TABLE IF EXISTS dsm; CREATE TABLE dsm(rid serial, rast raster)"))
         for t in tiles:
-            path = cached(t["attributes"]["DATA_URL"], f"{t['attributes']['DATA_NAME']}.zip")
+            path = cached(gsiLidarAPI.downloadTile, f"{t['DATA_NAME']}.zip", t["DATA_URL"])
             tif = next(n for n in zipfile.ZipFile(path).namelist() if n.endswith(".tif"))
             with rasterio.open(f"zip://{path}!{tif}") as src, rasterio.MemoryFile() as mem:
                 with mem.open(**{**src.profile, "driver": "GTiff", "crs": "EPSG:2157"}) as dst:
@@ -216,12 +191,8 @@ def load_lidar():
 
 @source("osm_infrastructure")
 def load_osm():
-    q = f"""[out:json][timeout:300];
-    ( way["highway"]({S},{W},{N},{E}); way["building"]({S},{W},{N},{E}); way["railway"~"rail|light_rail"]({S},{W},{N},{E});
-      nwr["amenity"~"hospital|clinic|school|fire_station|police"]({S},{W},{N},{E}); nwr["power"="substation"]({S},{W},{N},{E}); );
-    out tags geom;"""
     rows = []
-    for el in patient("POST", URLS["overpass"], data={"data": q}, timeout=360).json()["elements"]:
+    for el in need(osmAPI.infrastructureQuery(S, W, N, E), "Overpass"):
         tags = el.get("tags", {})
         if el["type"] == "node":
             geom = Point(el["lon"], el["lat"])
@@ -241,15 +212,13 @@ def load_osm():
 
 @source("cso_small_areas")
 def load_small_areas():
-    res = http.get(URLS["cso_ckan"]).json()["result"]["resources"]
-    url = next(r["url"] for r in res if r["format"].lower() in ("geojson", "json"))
-    gdf = gpd.read_file(io.BytesIO(patient("GET", url).content))
+    gdf = gpd.read_file(io.BytesIO(need(csoAPI.smallAreaBoundaries(), "CSO small areas")))
     return to_db(gdf[gdf.intersects(DUBLIN.to_crs(gdf.crs)[0])], "small_areas")
 
 
 @source("cso_saps_population")
 def load_saps():
-    df = pd.read_csv(io.BytesIO(http.get(URLS["cso_saps"]).content), low_memory=False)
+    df = pd.read_csv(io.BytesIO(need(csoAPI.smallAreaPopulation(), "CSO SAPS")), low_memory=False)
     df.to_sql("saps", db, if_exists="replace", index=False)
     return f"{len(df)} small areas -> saps"
 
