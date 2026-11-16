@@ -5,6 +5,18 @@ water level reading through MQTT -> Kafka, then list infrastructure in the flood
     pip install -r requirements.txt
     python load_all.py                  # SIM_LEVEL=2.9 to force a reading
 
+Every setting comes from an environment variable, so the same image runs on a laptop or on Azure:
+    DB_URL            SQLAlchemy URL; on Azure add ?sslmode=require
+    KAFKA             bootstrap servers, e.g. <namespace>.servicebus.windows.net:9093 for Event Hubs
+    KAFKA_TOPIC       default flood.readings (on Event Hubs, create an event hub with this name)
+    KAFKA_GROUP       consumer group, default flood-detector
+    KAFKA_SECURITY_PROTOCOL / KAFKA_SASL_MECHANISM / KAFKA_SASL_USERNAME / KAFKA_SASL_PASSWORD
+                      for Event Hubs: SASL_SSL / PLAIN / $ConnectionString / <connection string>
+    MQTT_HOST, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TLS=1
+    SKIP_SENSOR_HOP=1 skip the MQTT -> Kafka step (when no broker is deployed)
+    CACHE             folder for big downloads, default ./data (mount a volume to keep it between runs)
+    DB_WAIT_SECONDS   how long to wait for the database on start, default 120
+
 Every call to an outside service lives in ../APIs (opwAPI, marineTideAPI, metEireannAPI,
 busAPI, gsiLidarAPI, osmAPI, csoAPI). This file only shapes the data and loads it into PostGIS.
 """
@@ -22,8 +34,30 @@ from sqlalchemy import create_engine, text
 
 DB_URL = os.getenv("DB_URL", "postgresql+psycopg://flood:flood@localhost:5432/flood")
 MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 KAFKA = os.getenv("KAFKA", "localhost:9092")
-CACHE = Path(os.getenv("CACHE", "data")); CACHE.mkdir(exist_ok=True)
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "flood.readings")
+CACHE = Path(os.getenv("CACHE", "data")); CACHE.mkdir(parents=True, exist_ok=True)
+
+
+def kafka_config(**extra):
+    """Plain localhost Kafka by default; SASL_SSL (Azure Event Hubs, Confluent Cloud) when the env vars are set."""
+    conf = {"bootstrap.servers": KAFKA, **extra}
+    for env, key in (("KAFKA_SECURITY_PROTOCOL", "security.protocol"), ("KAFKA_SASL_MECHANISM", "sasl.mechanisms"),
+                     ("KAFKA_SASL_USERNAME", "sasl.username"), ("KAFKA_SASL_PASSWORD", "sasl.password")):
+        if os.getenv(env):
+            conf[key] = os.environ[env]
+    return conf
+
+
+def mqtt_client(mqtt):
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    if os.getenv("MQTT_USERNAME"):
+        client.username_pw_set(os.environ["MQTT_USERNAME"], os.getenv("MQTT_PASSWORD"))
+    if os.getenv("MQTT_TLS") == "1":
+        client.tls_set()
+    client.connect(MQTT_HOST, MQTT_PORT)
+    return client
 
 W, S, E, N = -6.39, 53.29, -6.10, 53.42          # Dublin city, WGS84
 ITM = 2157                                        # Irish Transverse Mercator, metres
@@ -73,14 +107,40 @@ def save_reading(source_name, station, level_m, t):
                   dict(t=t, s=source_name, st=station, v=level_m))
 
 
+def wait_for_db():
+    """On Azure the database may still be starting; wait, then stop with one clear line instead of a traceback."""
+    deadline = time.time() + float(os.getenv("DB_WAIT_SECONDS", "120"))
+    while True:
+        try:
+            with db.connect() as c:
+                c.execute(text("SELECT 1"))
+            return
+        except Exception as e:
+            if time.time() > deadline:
+                safe = db.url.render_as_string(hide_password=True)
+                sys.exit(f"Cannot reach the database at {safe}: {type(e).__name__}: {str(e).strip().splitlines()[0][:200]}\n"
+                         "Set DB_URL (and on Azure add ?sslmode=require and allow this container's IP).")
+            print("Waiting for the database...", flush=True)
+            time.sleep(5)
+
+
 def setup_db():
+    wait_for_db()
+    for ext in ("postgis", "postgis_raster", "timescaledb", "pgrouting"):
+        try:  # one at a time, so a managed database without e.g. TimescaleDB still works
+            with db.begin() as c:
+                c.execute(text(f"CREATE EXTENSION IF NOT EXISTS {ext} CASCADE"))
+        except Exception as e:
+            if ext == "postgis":
+                sys.exit(f"PostGIS is required but could not be enabled: {str(e).strip().splitlines()[0][:200]}\n"
+                         "On Azure Database for PostgreSQL, add POSTGIS to the azure.extensions server parameter.")
+            print(f"{'db_extension':<22}WARN  {ext} not available, carrying on without it")
     with db.begin() as c:
-        for ext in ("postgis", "postgis_raster", "timescaledb", "pgrouting"):
-            c.execute(text(f"CREATE EXTENSION IF NOT EXISTS {ext} CASCADE"))
         c.execute(text("""CREATE TABLE IF NOT EXISTS readings(
             time timestamptz NOT NULL, source text, station text, level_m double precision,
             PRIMARY KEY (time, source, station))"""))
-        c.execute(text("SELECT create_hypertable('readings', 'time', if_not_exists => TRUE)"))
+        if c.execute(text("SELECT count(*) FROM pg_extension WHERE extname = 'timescaledb'")).scalar():
+            c.execute(text("SELECT create_hypertable('readings', 'time', if_not_exists => TRUE)"))
 
 
 # ---------------- live feeds ----------------
@@ -237,14 +297,16 @@ def sensor_hop():
                "time": dt.datetime.now(dt.timezone.utc).isoformat() if sim else live.time.isoformat(),
                "source": "simulated" if sim else "marine"}
 
-    producer = Producer({"bootstrap.servers": KAFKA})
+    if os.getenv("SKIP_SENSOR_HOP") == "1":
+        return "skipped (SKIP_SENSOR_HOP=1)"
+    producer = Producer(kafka_config())
     got = []
-    sub = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)  # edge gateway: MQTT -> Kafka bridge
-    sub.on_message = lambda c, u, m: (producer.produce("flood.readings", m.payload), producer.flush(), got.append(1))
-    sub.connect(MQTT_HOST); sub.subscribe("sensors/dublin-port/level", qos=1); sub.loop_start()
+    sub = mqtt_client(mqtt)  # edge gateway: MQTT -> Kafka bridge
+    sub.on_message = lambda c, u, m: (producer.produce(KAFKA_TOPIC, m.payload), producer.flush(10), got.append(1))
+    sub.subscribe("sensors/dublin-port/level", qos=1); sub.loop_start()
     time.sleep(0.5)
-    pub = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)  # the field sensor
-    pub.connect(MQTT_HOST); pub.loop_start()
+    pub = mqtt_client(mqtt)  # the field sensor
+    pub.loop_start()
     pub.publish("sensors/dublin-port/level", json.dumps(reading), qos=1).wait_for_publish(timeout=10)
     pub.loop_stop()
     for _ in range(50):
@@ -252,14 +314,18 @@ def sensor_hop():
         time.sleep(0.1)
     sub.loop_stop()
 
-    consumer = Consumer({"bootstrap.servers": KAFKA, "group.id": f"flood-detector-{uuid.uuid4()}", "auto.offset.reset": "earliest"})
-    consumer.subscribe(["flood.readings"])
+    if not got:
+        raise RuntimeError(f"the reading never came back from MQTT at {MQTT_HOST}:{MQTT_PORT}")
+    consumer = Consumer(kafka_config(**{"group.id": os.getenv("KAFKA_GROUP", "flood-detector"), "auto.offset.reset": "earliest"}))
+    consumer.subscribe([KAFKA_TOPIC])
     msg = None
     for _ in range(30):
         msg = consumer.poll(1.0)
         if msg and not msg.error() and json.loads(msg.value()).get("id") == reading["id"]:
             break
     consumer.close()
+    if not msg or msg.error() or json.loads(msg.value()).get("id") != reading["id"]:
+        raise RuntimeError(f"the reading did not arrive on Kafka topic {KAFKA_TOPIC} at {KAFKA} within 30 s")
     r = json.loads(msg.value())
     save_reading(r["source"], r["station"], r["level_m"], r["time"])
     return f"{r['station']} {r['level_m']} m OD Malin ({r['source']}) via MQTT -> Kafka -> readings"
@@ -268,20 +334,29 @@ def sensor_hop():
 # ---------------- the check ----------------
 
 def flood_check():
+    """Returns False when the check could not run because a needed layer or reading is missing."""
     with db.connect() as c:
+        missing = [t for t in ("cfram_nodes", "flood_extent_coast")
+                   if not c.execute(text("SELECT to_regclass(:t) IS NOT NULL"), dict(t=t)).scalar()]
+        if missing:
+            print(f"\nFlood check skipped: {', '.join(missing)} did not load (see FAIL lines above).")
+            return False
         lvl = c.execute(text("SELECT level_m, source FROM readings WHERE station='Dublin Port' AND (source <> 'simulated' OR :sim)"
                              " ORDER BY time DESC LIMIT 1"), dict(sim=bool(os.getenv("SIM_LEVEL")))).first()
         node = c.execute(text("""SELECT "WL_10PC", "WL_05PC", "WL_01PC" FROM cfram_nodes
             WHERE "WL_10PC" > 0 ORDER BY geometry <-> ST_Transform(ST_SetSRID(ST_MakePoint(:x, :y), 4326), 2157) LIMIT 1"""),
             dict(x=DUBLIN_PORT.x, y=DUBLIN_PORT.y)).first()
+        if lvl is None or node is None:
+            print("\nFlood check skipped: no Dublin Port reading yet (marine_tide_gauges failed?). Set SIM_LEVEL to test.")
+            return False
         print(f"\nDublin Port {lvl.level_m:.2f} m ({lvl.source}); CFRAM node 10% {node.WL_10PC:.2f} / 0.5% {node.WL_05PC:.2f} / 0.1% {node.WL_01PC:.2f}")
         band = next((b for b, wl in (("0.1%", node.WL_01PC), ("0.5%", node.WL_05PC), ("10%", node.WL_10PC)) if lvl.level_m >= wl), None)
         if not band:
             print("Below the 10% AEP level: no flood extent active.")
-            return
+            return True
         if not c.execute(text("SELECT to_regclass('infrastructure') IS NOT NULL")).scalar():
             print(f"{band} AEP coastal extent is active, but no infrastructure layer is loaded.")
-            return
+            return False
         has_dsm = c.execute(text("SELECT to_regclass('dsm') IS NOT NULL")).scalar()
         depth = """(SELECT :lvl - max(ST_Value(d.rast, ST_PointOnSurface(i.geometry))) FROM dsm d
                     WHERE ST_Intersects(d.rast, ST_PointOnSurface(i.geometry)))""" if has_dsm else "NULL"
@@ -299,6 +374,7 @@ def flood_check():
     for r in rows:
         d = f"{r.depth:.2f} m" if r.depth is not None else "depth n/a"
         print(f"  {grade(r.kind, r.depth):<8}{r.kind:<9}{r.name}  ({d})")
+    return True
 
 
 if __name__ == "__main__":
@@ -307,4 +383,7 @@ if __name__ == "__main__":
                  load_nodes, load_river, load_coast, load_icwws, load_lidar, load_osm,
                  load_small_areas, load_saps, sensor_hop):
         load()
-    flood_check()
+    failed = [n for n, s in status.items() if s.startswith("FAIL")]
+    if failed:
+        print(f"\n{len(failed)} of {len(status)} sources failed: {', '.join(failed)}")
+    sys.exit(0 if flood_check() else 1)
