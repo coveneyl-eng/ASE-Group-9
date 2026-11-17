@@ -1,0 +1,294 @@
+{
+ "info": {
+  "name": "Smart City thin slice API",
+  "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+ },
+ "variable": [
+  {
+   "key": "gateway",
+   "value": "https://localhost:8444"
+  },
+  {
+   "key": "dispatcher",
+   "value": ""
+  },
+  {
+   "key": "planner",
+   "value": ""
+  }
+ ],
+ "item": [
+  {
+   "name": "Get dispatcher token",
+   "request": {
+    "method": "POST",
+    "url": "{{gateway}}/api/approval/token",
+    "header": [],
+    "body": {
+     "mode": "urlencoded",
+     "urlencoded": [
+      {
+       "key": "username",
+       "value": "dispatcher"
+      },
+      {
+       "key": "password",
+       "value": "dispatch-demo"
+      }
+     ]
+    }
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "exec": [
+       "pm.test('200', () => pm.response.to.have.status(200));",
+       "pm.collectionVariables.set('dispatcher', pm.response.json().access_token);"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Get planner token",
+   "request": {
+    "method": "POST",
+    "url": "{{gateway}}/api/approval/token",
+    "header": [],
+    "body": {
+     "mode": "urlencoded",
+     "urlencoded": [
+      {
+       "key": "username",
+       "value": "planner"
+      },
+      {
+       "key": "password",
+       "value": "planner-demo"
+      }
+     ]
+    }
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "exec": [
+       "pm.test('200', () => pm.response.to.have.status(200));",
+       "pm.collectionVariables.set('planner', pm.response.json().access_token);"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Bad password is rejected",
+   "request": {
+    "method": "POST",
+    "url": "{{gateway}}/api/approval/token",
+    "header": [],
+    "body": {
+     "mode": "urlencoded",
+     "urlencoded": [
+      {
+       "key": "username",
+       "value": "dispatcher"
+      },
+      {
+       "key": "password",
+       "value": "wrong"
+      }
+     ]
+    }
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "exec": [
+       "pm.test('401', () => pm.response.to.have.status(401));"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Gateway blocks notifications without JWT",
+   "request": {
+    "method": "GET",
+    "url": "{{gateway}}/api/notify/notifications/recent",
+    "header": []
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "exec": [
+       "pm.test('401', () => pm.response.to.have.status(401));"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Gateway allows notifications with JWT",
+   "request": {
+    "method": "GET",
+    "url": "{{gateway}}/api/notify/notifications/recent",
+    "header": [
+     {
+      "key": "Authorization",
+      "value": "Bearer {{dispatcher}}"
+     }
+    ]
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "exec": [
+       "pm.test('200', () => pm.response.to.have.status(200));",
+       "pm.test('array', () => pm.expect(pm.response.json()).to.be.an('array'));"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Planner cannot dispatch responders",
+   "request": {
+    "method": "POST",
+    "url": "{{gateway}}/api/approval/approvals",
+    "header": [
+     {
+      "key": "Authorization",
+      "value": "Bearer {{planner}}"
+     },
+     {
+      "key": "Content-Type",
+      "value": "application/json"
+     }
+    ],
+    "body": {
+     "mode": "raw",
+     "raw": "{\"impact_id\": \"postman-test\", \"action\": \"dispatch_responders\", \"confirm\": true}"
+    }
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "exec": [
+       "pm.test('403', () => pm.response.to.have.status(403));"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Approval needs explicit confirmation",
+   "request": {
+    "method": "POST",
+    "url": "{{gateway}}/api/approval/approvals",
+    "header": [
+     {
+      "key": "Authorization",
+      "value": "Bearer {{dispatcher}}"
+     },
+     {
+      "key": "Content-Type",
+      "value": "application/json"
+     }
+    ],
+    "body": {
+     "mode": "raw",
+     "raw": "{\"impact_id\": \"postman-test\", \"action\": \"dispatch_responders\", \"confirm\": false}"
+    }
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "exec": [
+       "pm.test('400', () => pm.response.to.have.status(400));"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Dispatcher approves dispatch",
+   "request": {
+    "method": "POST",
+    "url": "{{gateway}}/api/approval/approvals",
+    "header": [
+     {
+      "key": "Authorization",
+      "value": "Bearer {{dispatcher}}"
+     },
+     {
+      "key": "Content-Type",
+      "value": "application/json"
+     }
+    ],
+    "body": {
+     "mode": "raw",
+     "raw": "{\"impact_id\": \"postman-test\", \"action\": \"dispatch_responders\", \"confirm\": true}"
+    }
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "exec": [
+       "pm.test('200', () => pm.response.to.have.status(200));",
+       "pm.test('blob report', () => pm.expect(pm.response.json().report_blob).to.include('postman-test'));"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Audit log shows approval",
+   "request": {
+    "method": "GET",
+    "url": "{{gateway}}/api/approval/audit",
+    "header": [
+     {
+      "key": "Authorization",
+      "value": "Bearer {{dispatcher}}"
+     }
+    ]
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "exec": [
+       "pm.test('logged', () => pm.expect(pm.response.json().map(r => r.payload.impact_id)).to.include('postman-test'));"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Public status map data",
+   "request": {
+    "method": "GET",
+    "url": "{{gateway}}/api/state",
+    "header": []
+   },
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "exec": [
+       "pm.test('200', () => pm.response.to.have.status(200));"
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

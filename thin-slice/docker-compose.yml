@@ -1,0 +1,179 @@
+# Smart City thin slice: every technology in the technical architecture, running locally.
+# Run from thin-slice/:  ./scripts/gen_certs.sh && docker compose up -d --build && ./scripts/verify.sh
+# The Python image is built from the repo root so it contains the team's API clients in ../APIs.
+name: smartcity
+
+x-python: &python
+  build: {context: .., dockerfile: thin-slice/Dockerfile}
+  image: smartcity/agents:dev
+  restart: unless-stopped
+  env_file: [{path: .env, required: false}]  # provider keys (SMSAPI_TOKEN, TICKETMASTER_API_KEY, ...) go here
+  environment: &python-env
+    KAFKA_BOOTSTRAP: kafka:9093
+    KAFKA_SECURITY_PROTOCOL: SASL_SSL
+    KAFKA_SASL_USERNAME: smartcity
+    KAFKA_SASL_PASSWORD: smartcity-pass
+    KAFKA_CA_FILE: /certs/ca.crt
+    DATABASE_URL: postgresql://smartcity:smartcity@postgres:5432/smartcity
+    MQTT_HOST: mosquitto
+    MQTT_CA_FILE: /certs/ca.crt
+    TRAFFIC_LIGHTS_URL: http://traffic-lights:8090
+    KEY_VAULT_URL: https://lowkey-vault:8443
+    KEY_VAULT_EMULATOR: "1"
+    KEY_VAULT_SEED: "1"
+    BLOB_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;"
+  volumes: [./certs:/certs:ro]
+  depends_on: &python-deps
+    kafka: {condition: service_healthy}
+    postgres: {condition: service_healthy}
+
+services:
+  # ---------- Field network ----------
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports: ["8883:8883"]
+    volumes:
+      - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./deploy/mosquitto/passwd:/mosquitto/config/passwd:ro
+      - ./certs:/mosquitto/certs:ro
+
+  sensor-sim:
+    <<: *python
+    command: python -m smartcity.simulators.sensors
+    depends_on: [mosquitto]
+
+  # ---------- Event bus ----------
+  kafka:
+    image: apache/kafka:3.9.1
+    ports: ["9092:9092"]
+    volumes: [./certs:/etc/kafka/secrets:ro]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,SASL_SSL://:9093,CONTROLLER://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,SASL_SSL://kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASL_SSL:SASL_SSL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9094
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+      KAFKA_LISTENER_NAME_SASL__SSL_PLAIN_SASL_JAAS_CONFIG: >-
+        org.apache.kafka.common.security.plain.PlainLoginModule required
+        user_smartcity="smartcity-pass";
+      KAFKA_SSL_KEYSTORE_FILENAME: kafka.keystore.jks
+      KAFKA_SSL_KEYSTORE_CREDENTIALS: kafka_creds
+      KAFKA_SSL_KEY_CREDENTIALS: kafka_creds
+      KAFKA_SSL_TRUSTSTORE_FILENAME: kafka.truststore.jks
+      KAFKA_SSL_TRUSTSTORE_CREDENTIALS: kafka_creds
+      KAFKA_SSL_CLIENT_AUTH: none
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      retries: 12
+
+  # ---------- Data and secrets ----------
+  postgres:
+    build: ./db
+    image: smartcity/postgres:dev
+    ports: ["5432:5432"]
+    environment: {POSTGRES_USER: smartcity, POSTGRES_PASSWORD: smartcity, POSTGRES_DB: smartcity}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smartcity -d smartcity"]
+      interval: 5s
+      retries: 20
+
+  azurite:  # Azure Blob Storage emulator
+    image: mcr.microsoft.com/azure-storage/azurite
+    command: azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck
+    ports: ["10000:10000"]
+
+  lowkey-vault:  # Azure Key Vault emulator
+    image: nagyesta/lowkey-vault:2.7.1
+    environment:
+      LOWKEY_ARGS: "--LOWKEY_VAULT_ALIASES=localhost=lowkey-vault:<port>"
+    ports: ["8443:8443"]
+
+  static-loader:  # AKS CronJob in production; one-shot here
+    <<: *python
+    restart: "no"
+    command: ./loader/load_static.sh
+    depends_on:
+      postgres: {condition: service_healthy}
+      azurite: {condition: service_started}
+
+  # ---------- Ingest and DMZ ----------
+  mqtt-bridge:
+    <<: *python
+    command: python -m smartcity.services.mqtt_bridge
+    environment: {<<: *python-env, MQTT_USERNAME: bridge, MQTT_PASSWORD: bridge-pass}
+    depends_on: {<<: *python-deps, mosquitto: {condition: service_started}}
+
+  ingest:
+    <<: *python
+    command: python -m smartcity.services.ingest --interval 900
+
+  # ---------- Agents ----------
+  flood-detector: {<<: *python, command: python -m smartcity.agents.flood_detector}
+  flood-scope: {<<: *python, command: python -m smartcity.agents.flood_scope}
+  flood-predictor: {<<: *python, command: python -m smartcity.agents.flood_predictor}
+  rerouting: {<<: *python, command: python -m smartcity.agents.rerouting}
+  event-monitoring: {<<: *python, command: python -m smartcity.agents.event_monitoring}
+  event-coordinating: {<<: *python, command: python -m smartcity.agents.event_coordinating}
+  public-transport: {<<: *python, command: python -m smartcity.agents.public_transport}
+  traffic-monitoring: {<<: *python, command: python -m smartcity.agents.traffic_monitoring}
+  traffic-control: {<<: *python, command: python -m smartcity.agents.traffic_control}
+
+  # ---------- Communication & coordination ----------
+  notification:
+    <<: *python
+    command: uvicorn smartcity.services.notification:app --host 0.0.0.0 --port 8001
+  approval:
+    <<: *python
+    command: uvicorn smartcity.services.approval:app --host 0.0.0.0 --port 8002
+    depends_on: {<<: *python-deps, lowkey-vault: {condition: service_started}, azurite: {condition: service_started}}
+  ws-hub:
+    <<: *python
+    command: uvicorn smartcity.services.ws_hub:app --host 0.0.0.0 --port 8003
+    depends_on: {<<: *python-deps, approval: {condition: service_started}}
+  traffic-lights:  # the team's simulated city traffic-light control API (APIs/trafficControlAPI.py)
+    <<: *python
+    command: python /repo/APIs/trafficControlAPI.py --port 8090
+    ports: ["8090:8090"]
+    depends_on: []
+
+  # ---------- Gateway + clients ----------
+  nginx:
+    build: ./portal
+    image: smartcity/portal-gateway:dev
+    ports: ["8444:443"]
+    environment:
+      NGINX_PORT: "443"
+      CERT_DIR: /certs
+      PORTAL_ROOT: /usr/share/nginx/html
+      APPROVAL_UPSTREAM: approval:8002
+      NOTIFY_UPSTREAM: notification:8001
+      WS_UPSTREAM: ws-hub:8003
+    volumes:
+      - ./deploy/nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./certs:/certs:ro
+    depends_on: [approval, notification, ws-hub]
+
+  # ---------- Observability ----------
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    ports: ["9090:9090"]
+    volumes: [./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro]
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports: ["3000:3000"]
+    environment: {GF_AUTH_ANONYMOUS_ENABLED: "true", GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer}
+    volumes: [./deploy/grafana/provisioning:/etc/grafana/provisioning:ro]
+    depends_on: [prometheus]
+
+volumes:
+  pgdata:

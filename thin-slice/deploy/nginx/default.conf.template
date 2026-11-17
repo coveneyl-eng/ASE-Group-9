@@ -1,0 +1,46 @@
+# NGINX gateway: TLS termination, reverse proxy, JWT enforced at the edge via auth_request.
+# Upstreams are filled in from environment variables by the nginx image's envsubst step.
+map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+
+server {
+    listen ${NGINX_PORT} ssl http2;  # works on nginx 1.24 (Ubuntu) and 1.27 (compose image)
+    server_name localhost;
+    ssl_certificate     ${CERT_DIR}/nginx.crt;
+    ssl_certificate_key ${CERT_DIR}/nginx.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    # Officials' portal + public status map (React build)
+    root ${PORTAL_ROOT};
+    location / { try_files $uri /index.html; }
+
+    # Token check used by protected routes: the approval service validates the JWT
+    location = /_auth {
+        internal;
+        proxy_pass http://${APPROVAL_UPSTREAM}/me;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Authorization $http_authorization;
+    }
+
+    # OAuth2 token endpoint + approvals (the service checks roles itself)
+    location /api/approval/ { proxy_pass http://${APPROVAL_UPSTREAM}/; }
+
+    # Notification history: officials only, enforced at the gateway
+    location /api/notify/ {
+        auth_request /_auth;
+        proxy_pass http://${NOTIFY_UPSTREAM}/;
+    }
+
+    # Public status map data (no login for the general public)
+    location = /api/state { proxy_pass http://${WS_UPSTREAM}/state; }
+
+    # Live updates to the officials' portal (JWT checked by the hub on connect)
+    location /ws {
+        proxy_pass http://${WS_UPSTREAM}/ws;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 1h;
+    }
+}
