@@ -92,8 +92,9 @@ services:
     command: azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck
     ports: ["10000:10000"]
 
-  lowkey-vault:  # Azure Key Vault emulator
+  lowkey-vault:  # Azure Key Vault emulator (Intel image; runs under emulation on Apple-chip Macs)
     image: nagyesta/lowkey-vault:2.7.1
+    platform: linux/amd64
     environment:
       LOWKEY_ARGS: "--LOWKEY_VAULT_ALIASES=localhost=lowkey-vault:<port>"
     ports: ["8443:8443"]
