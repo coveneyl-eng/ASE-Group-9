@@ -286,6 +286,20 @@ def main() -> int:
         assert {"hello", "flood.impacts"} <= set(got), got
         return f"received {got}"
 
+    @check("System-health dashboard API via NGINX: component probes, topic activity, role-checked test flood")
+    def _():
+        with http() as h:
+            assert h.get(f"{GATEWAY}/api/hub/status").status_code == 401
+            st = h.get(f"{GATEWAY}/api/hub/status", headers={"Authorization": f"Bearer {tokens['dispatcher']}"})
+            assert st.status_code == 200, st.text
+            checks = {c["id"]: c["status"] for c in st.json()["checks"]}
+            assert checks.get("kafka") == "ok" and checks.get("mosquitto") == "ok", checks
+            denied = h.post(f"{GATEWAY}/api/hub/simulate-flood", json={"level_m": 3.0},
+                            headers={"Authorization": f"Bearer {tokens['planner']}"})
+            assert denied.status_code == 403, denied.text
+        counts = {k: list(checks.values()).count(k) for k in ("ok", "degraded", "down", "skipped")}
+        return f"{len(checks)} components {counts}; planner cannot send test readings (403)"
+
     @check("Public status map data via NGINX (no login)")
     def _():
         with http() as h:

@@ -32,6 +32,9 @@ server {
         proxy_pass http://${NOTIFY_UPSTREAM}/;
     }
 
+    # System-health dashboard API (the hub checks the JWT and the role itself)
+    location /api/hub/ { proxy_pass http://${WS_UPSTREAM}/; }
+
     # Public status map data (no login for the general public)
     location = /api/state { proxy_pass http://${WS_UPSTREAM}/state; }
 

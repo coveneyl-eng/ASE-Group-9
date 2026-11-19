@@ -139,6 +139,13 @@ services:
   ws-hub:
     <<: *python
     command: uvicorn smartcity.services.ws_hub:app --host 0.0.0.0 --port 8003
+    environment:
+      <<: *python-env
+      NOTIFY_URL: http://notification:8001
+      APPROVAL_URL: http://approval:8002
+      GATEWAY_URL: https://nginx:443
+      PROMETHEUS_URL: http://prometheus:9090
+      GRAFANA_URL: http://grafana:3000
     depends_on: {<<: *python-deps, approval: {condition: service_started}}
   traffic-lights:  # the team's simulated city traffic-light control API (APIs/trafficControlAPI.py)
     <<: *python

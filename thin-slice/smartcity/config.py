@@ -60,3 +60,11 @@ OFFLINE = env("OFFLINE", "0") == "1"  # use fixtures instead of live public APIs
 
 # Observability: each process exposes Prometheus metrics on this port
 METRICS_PORT = int(env("METRICS_PORT", "0"))
+
+# System-health dashboard: where the WebSocket hub probes the other components ("" = not deployed, skipped)
+NOTIFY_URL = env("NOTIFY_URL", "http://localhost:8001")
+APPROVAL_URL = env("APPROVAL_URL", "http://localhost:8002")
+GATEWAY_URL = env("GATEWAY_URL", "https://localhost:8444")
+PROMETHEUS_URL = env("PROMETHEUS_URL", "http://localhost:9090")
+GRAFANA_URL = env("GRAFANA_URL", "")
+AGENT_METRICS = env("AGENT_METRICS", "")  # "flood-detector=http://host:port/metrics,..."; default compose names

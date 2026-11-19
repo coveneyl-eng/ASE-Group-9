@@ -68,3 +68,14 @@ def test_jwt_roles():
     claims = jwt.decode(token, approval.JWT_SECRET, algorithms=["HS256"], issuer=approval.config.JWT_ISSUER)
     assert claims["role"] not in approval.CAN_APPROVE["dispatch_responders"]
     assert claims["role"] in approval.CAN_APPROVE["close_roads"]
+
+
+def test_health_agent_urls_default_and_override(monkeypatch):
+    from smartcity import config
+    from smartcity.services import health
+    monkeypatch.setattr(config, "AGENT_METRICS", "")
+    assert health.agent_metrics_urls()["flood-scope"] == "http://flood-scope:9464/metrics"
+    monkeypatch.setattr(config, "AGENT_METRICS", "flood-scope=http://localhost:9466/metrics")
+    urls = health.agent_metrics_urls()
+    assert urls["flood-scope"] == "http://localhost:9466/metrics" and len(urls) == len(health.AGENTS)
+    assert health.age_words(30) == "30 s" and health.age_words(600) == "10 min"

@@ -38,7 +38,7 @@ docker compose logs -f static-loader   # wait for "[loader] done"
 
 | URL | What |
 |---|---|
-| https://localhost:8444 | Officials' portal (sign in `dispatcher` / `dispatch-demo`) |
+| https://localhost:8444 | Officials' portal: **System health** dashboard + Operations (sign in `dispatcher` / `dispatch-demo`) |
 | https://localhost:8444/?public | Public status map (no login) |
 | http://localhost:9090 | Prometheus |
 | http://localhost:3000 | Grafana → *Smart City thin slice* dashboard |
@@ -46,13 +46,28 @@ docker compose logs -f static-loader   # wait for "[loader] done"
 
 Trigger a flood by hand: `docker compose run --rm sensor-sim python -m smartcity.simulators.sensors --flood`
 
+## System-health dashboard
+
+The portal opens on **System health**: one screen that shows every technology is up and talking.
+
+- **Components**: a probe per technology (Mosquitto, Kafka, PostgreSQL and extensions, static layers, Blob Storage,
+  Key Vault, every agent, Notification, Approval, WebSocket hub, NGINX, traffic-light API, Prometheus, Grafana),
+  re-run every 3 s. Green = healthy, amber = degraded, red = down, hollow = not deployed in this environment.
+- **Live flood pipeline**: follows one reading by its trace id through MQTT, Kafka, the flood agents, rerouting and
+  the SMS/email alerts, with the time each stage took.
+- **Test flood reading**: emergency responders can publish a reading through Mosquitto from the page.
+- **Kafka topics** and **sensor-to-alert latency** (p95 over the last hour against the 5 s target).
+
+Backend: `GET /api/hub/status` and `POST /api/hub/simulate-flood` on the WebSocket hub (`services/ws_hub.py`,
+probes in `services/health.py`); both need a JWT, and the trigger needs the `emergency_responder` role.
+
 ## Demo script (≈5 minutes)
 
 1. `docker compose ps`: every container in the technical architecture is up.
-2. Open the portal and sign in. Keep it visible.
-3. Run `./scripts/verify.sh`. While it runs, the portal map turns the flood extent blue and marks assets
-   red, amber or green. The message feed shows `flood.impacts`, `traffic.reroute` and `notifications.sent`
-   arriving live over the WebSocket.
+2. Open the portal and sign in: the System health dashboard shows every component green.
+3. Press **Send reading** on the dashboard and watch the pipeline light up stage by stage, then run
+   `./scripts/verify.sh` for the full PASS/FAIL table. The Operations tab shows the flood extent and the
+   assets graded red, amber or green.
 4. Walk through the PASS table: one line per technology interaction. Point out the
    **sensor→alert latency** (≈1 s against the 5 s QoS target) and the **planner 403 / dispatcher 200**
    role check.

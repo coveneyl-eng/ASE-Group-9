@@ -1,4 +1,4 @@
-// TypeScript mirrors of smartcity/models.py (DRY: keep field names identical).
+// TypeScript mirrors of smartcity/models.py and the hub's /status response (DRY: keep field names identical).
 export interface AssetImpact {
   asset_id: number;
   name: string;
@@ -27,6 +27,7 @@ export interface RerouteCommand {
   path_edges: number[];
   avoided_edges: number[];
   total_cost: number;
+  closed_light_sites: string[];
 }
 
 export interface NotificationSent {
@@ -37,8 +38,40 @@ export interface NotificationSent {
   dry_run: boolean;
 }
 
+/** Every Kafka message carries these (smartcity.models.Message). */
+export interface MessageBase {
+  id: string;
+  trace_id: string;
+  created_at: string;
+  [key: string]: unknown;
+}
+
 export interface BusMessage {
   topic: string;
-  data: Record<string, unknown>;
-  receivedAt?: string;
+  data: MessageBase;
+  receivedAt: number; // ms since epoch, client clock
+}
+
+export type CheckStatus = "ok" | "degraded" | "down" | "skipped";
+
+export interface HealthCheck {
+  id: string;
+  name: string;
+  group: string;
+  status: CheckStatus;
+  detail: string;
+  ms: number;
+}
+
+export interface TopicActivity {
+  topic: string;
+  count: number;
+  seconds_ago: number | null;
+}
+
+export interface SystemStatus {
+  checks: HealthCheck[];
+  topics: TopicActivity[];
+  latency: { alerts_last_hour: number; p95_ms: number | null; last_ms: number | null; target_ms: number };
+  generated_at: number;
 }
