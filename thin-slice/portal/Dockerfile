@@ -2,7 +2,9 @@
 FROM node:22-alpine AS build
 WORKDIR /portal
 COPY package*.json ./
-RUN npm ci
+# Generous retries/timeouts so slow Wi-Fi doesn't kill the build; the cache mount keeps finished downloads between retries
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund --fetch-retries=10 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=180000
 COPY . .
 RUN npm run build
 

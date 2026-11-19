@@ -3,6 +3,9 @@
 # postgis/postgis is published for amd64 only.
 FROM postgres:16-bookworm
 
+# Retries and long timeouts for slow connections
+RUN echo 'Acquire::Retries "10"; Acquire::http::Timeout "120"; Acquire::https::Timeout "120";' > /etc/apt/apt.conf.d/80-retries
+
 # PostGIS + pgRouting from the PostgreSQL apt repository the base image already trusts
 RUN apt-get update \
  && apt-get install -y --no-install-recommends postgresql-16-postgis-3 postgresql-16-pgrouting \
