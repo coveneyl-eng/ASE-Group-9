@@ -1,5 +1,9 @@
-"""Hello-world thin slice: load every flood data source for Dublin city, pass one
-water level reading through MQTT -> Kafka, then list infrastructure in the flood zone.
+"""Hello-world thin slice: load every flood data source for Dublin city, stream the live
+water level readings through Kafka, then list infrastructure in the flood zone.
+
+The "sensors" are the OPW water level and Marine Institute tide gauge APIs. The ingest step
+polls them and publishes every reading to Kafka (flood.readings); the detector step consumes
+that topic and writes the readings to the database, where the flood check picks them up.
 
     docker compose up -d
     pip install -r requirements.txt
@@ -12,8 +16,7 @@ Every setting comes from an environment variable, so the same image runs on a la
     KAFKA_GROUP       consumer group, default flood-detector
     KAFKA_SECURITY_PROTOCOL / KAFKA_SASL_MECHANISM / KAFKA_SASL_USERNAME / KAFKA_SASL_PASSWORD
                       for Event Hubs: SASL_SSL / PLAIN / $ConnectionString / <connection string>
-    MQTT_HOST, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TLS=1
-    SKIP_SENSOR_HOP=1 skip the MQTT -> Kafka step (when no broker is deployed)
+    SKIP_KAFKA=1      write readings straight to the database (when no Kafka is deployed)
     CACHE             folder for big downloads, default ./data (mount a volume to keep it between runs)
     DB_WAIT_SECONDS   how long to wait for the database on start, default 120
 
@@ -33,8 +36,6 @@ from shapely.geometry import box, Point, LineString, Polygon
 from sqlalchemy import create_engine, text
 
 DB_URL = os.getenv("DB_URL", "postgresql+psycopg://flood:flood@localhost:5432/flood")
-MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 KAFKA = os.getenv("KAFKA", "localhost:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "flood.readings")
 CACHE = Path(os.getenv("CACHE", "data")); CACHE.mkdir(parents=True, exist_ok=True)
@@ -49,15 +50,6 @@ def kafka_config(**extra):
             conf[key] = os.environ[env]
     return conf
 
-
-def mqtt_client(mqtt):
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    if os.getenv("MQTT_USERNAME"):
-        client.username_pw_set(os.environ["MQTT_USERNAME"], os.getenv("MQTT_PASSWORD"))
-    if os.getenv("MQTT_TLS") == "1":
-        client.tls_set()
-    client.connect(MQTT_HOST, MQTT_PORT)
-    return client
 
 W, S, E, N = -6.39, 53.29, -6.10, 53.42          # Dublin city, WGS84
 ITM = 2157                                        # Irish Transverse Mercator, metres
@@ -99,6 +91,27 @@ def cached(download, name, *args):
 def to_db(gdf, table):
     gdf.to_crs(ITM).to_postgis(table, db, if_exists="replace", index=False)
     return f"{len(gdf)} rows -> {table}"
+
+
+USE_KAFKA = os.getenv("SKIP_KAFKA") != "1" and os.getenv("SKIP_SENSOR_HOP") != "1"
+_producer = None
+published = []        # ids of the readings this run sent to Kafka
+
+
+def publish_reading(source_name, station, level_m, t):
+    """Ingest: send one sensor reading to Kafka. If Kafka is switched off or rejects it, store it directly."""
+    global _producer
+    reading = {"id": str(uuid.uuid4()), "source": source_name, "station": station,
+               "level_m": float(level_m), "time": t.isoformat() if hasattr(t, "isoformat") else str(t)}
+    if not USE_KAFKA:
+        return save_reading(source_name, station, level_m, reading["time"])
+    if _producer is None:
+        from confluent_kafka import Producer
+        _producer = Producer(kafka_config())
+    fallback = lambda err, msg: err and save_reading(source_name, station, level_m, reading["time"])
+    _producer.produce(KAFKA_TOPIC, json.dumps(reading).encode(), key=station.encode(), on_delivery=fallback)
+    _producer.poll(0)
+    published.append(reading["id"])
 
 
 def save_reading(source_name, station, level_m, t):
@@ -150,7 +163,7 @@ def load_opw():
     gdf = gpd.read_file(io.BytesIO(need(opwAPI.latestWaterLevels(), "OPW water levels")))
     gdf = gdf.clip(DUBLIN.to_crs(gdf.crs))
     for r in gdf[gdf.value.notna()].itertuples():
-        save_reading("opw", f"{r.station_ref}_{r.sensor_ref}", float(r.value), r.datetime)
+        publish_reading("opw", f"{r.station_ref}_{r.sensor_ref}", float(r.value), r.datetime)
     return to_db(gdf, "opw_latest")
 
 
@@ -160,7 +173,7 @@ def load_tides():
     df = pd.DataFrame(t["rows"], columns=t["columnNames"])
     df = df[df.QC_Flag.astype(str) != "9"]  # 9 = missing; live rows are 0 (not yet QC'd), 1 = good
     for r in df.itertuples():
-        save_reading("marine", r.station_id, float(r.Water_Level_OD_Malin), r.time)
+        publish_reading("marine", r.station_id, float(r.Water_Level_OD_Malin), r.time)
     gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.longitude, df.latitude), crs=4326)
     return to_db(gdf, "tide_readings")
 
@@ -228,22 +241,40 @@ def load_icwws():
     return to_db(gdf.clip(DUBLIN.to_crs(ITM)), "icwws_points")
 
 
+def raster_wkb(band, transform, srid, nodata):
+    """One PostGIS raster tile as WKB, built in Python, so the database needs no GDAL drivers
+    (Azure Database for PostgreSQL does not let you enable them)."""
+    import struct
+    import numpy as np
+    h, w = band.shape
+    head = struct.pack("<BHHddddddiHH", 1, 0, 1, transform.a, transform.e, transform.c, transform.f,
+                       transform.b, transform.d, srid, w, h)
+    flags = 10 | (0x40 if nodata is not None else 0)          # 10 = 32-bit float pixels
+    nod = struct.pack("<f", nodata if nodata is not None else 0)
+    return head + bytes([flags]) + nod + np.ascontiguousarray(band, dtype="<f4").tobytes()
+
+
 @source("gsi_lidar_dsm")
 def load_lidar():
     # NYU 2015 Dublin city LiDAR: four 1 m surface-model tiles (rooftops included), the only GSI LiDAR over the city.
     import rasterio
+    from rasterio.windows import Window
+    size = 100
     tiles = need(gsiLidarAPI.lidarTiles(), "GSI LiDAR tile index")
     with db.begin() as c:
-        c.execute(text("SET postgis.gdal_enabled_drivers = 'GTiff'"))
         c.execute(text("DROP TABLE IF EXISTS dsm; CREATE TABLE dsm(rid serial, rast raster)"))
         for t in tiles:
             path = cached(gsiLidarAPI.downloadTile, f"{t['DATA_NAME']}.zip", t["DATA_URL"])
             tif = next(n for n in zipfile.ZipFile(path).namelist() if n.endswith(".tif"))
-            with rasterio.open(f"zip://{path}!{tif}") as src, rasterio.MemoryFile() as mem:
-                with mem.open(**{**src.profile, "driver": "GTiff", "crs": "EPSG:2157"}) as dst:
-                    dst.write(src.read())
-                c.execute(text("INSERT INTO dsm(rast) SELECT ST_Tile(ST_FromGDALRaster(:b, 2157), 100, 100)"),
-                          {"b": bytes(mem.getbuffer())})
+            with rasterio.open(f"zip://{path}!{tif}") as src:
+                band, nodata = src.read(1), src.nodata
+                rows = []
+                for r0 in range(0, src.height, size):
+                    for c0 in range(0, src.width, size):
+                        win = Window(c0, r0, min(size, src.width - c0), min(size, src.height - r0))
+                        block = band[r0:r0 + win.height, c0:c0 + win.width]
+                        rows.append({"b": raster_wkb(block, src.window_transform(win), ITM, nodata)})
+            c.execute(text("INSERT INTO dsm(rast) VALUES (ST_RastFromWKB(:b))"), rows)
         c.execute(text("CREATE INDEX ON dsm USING gist (ST_ConvexHull(rast))"))
         n = c.execute(text("SELECT count(*) FROM dsm")).scalar()
     return f"{n} raster tiles from {len(tiles)} NYU LiDAR tiles -> dsm"
@@ -283,52 +314,35 @@ def load_saps():
     return f"{len(df)} small areas -> saps"
 
 
-# ---------------- one reading through MQTT -> Kafka ----------------
+# ---------------- Kafka -> detector -> readings ----------------
 
-@source("mqtt_to_kafka")
-def sensor_hop():
-    import paho.mqtt.client as mqtt
-    from confluent_kafka import Producer, Consumer
-
-    with db.connect() as c:  # latest real Dublin Port level, unless SIM_LEVEL forces a simulated one
-        live = c.execute(text("SELECT time, level_m FROM readings WHERE station='Dublin Port' AND source='marine' ORDER BY time DESC LIMIT 1")).first()
-    sim = os.getenv("SIM_LEVEL") or (None if live else "2.80")
-    reading = {"id": str(uuid.uuid4()), "station": "Dublin Port", "level_m": float(sim) if sim else live.level_m,
-               "time": dt.datetime.now(dt.timezone.utc).isoformat() if sim else live.time.isoformat(),
-               "source": "simulated" if sim else "marine"}
-
-    if os.getenv("SKIP_SENSOR_HOP") == "1":
-        return "skipped (SKIP_SENSOR_HOP=1)"
-    producer = Producer(kafka_config())
-    got = []
-    sub = mqtt_client(mqtt)  # edge gateway: MQTT -> Kafka bridge
-    sub.on_message = lambda c, u, m: (producer.produce(KAFKA_TOPIC, m.payload), producer.flush(10), got.append(1))
-    sub.subscribe("sensors/dublin-port/level", qos=1); sub.loop_start()
-    time.sleep(0.5)
-    pub = mqtt_client(mqtt)  # the field sensor
-    pub.loop_start()
-    pub.publish("sensors/dublin-port/level", json.dumps(reading), qos=1).wait_for_publish(timeout=10)
-    pub.loop_stop()
-    for _ in range(50):
-        if got: break
-        time.sleep(0.1)
-    sub.loop_stop()
-
-    if not got:
-        raise RuntimeError(f"the reading never came back from MQTT at {MQTT_HOST}:{MQTT_PORT}")
+@source("kafka_to_readings")
+def detect():
+    """The flood detector: consume flood.readings and store each reading for the flood check."""
+    if os.getenv("SIM_LEVEL"):  # a simulated Dublin Port reading, to test what a flood looks like
+        publish_reading("simulated", "Dublin Port", float(os.environ["SIM_LEVEL"]), dt.datetime.now(dt.timezone.utc))
+    if not USE_KAFKA:
+        return "skipped (SKIP_KAFKA=1), readings were written straight to the database"
+    if not published:
+        return "nothing to stream (OPW and tide feeds returned no readings)"
+    left = _producer.flush(30)
+    if left:
+        raise RuntimeError(f"{left} readings could not be delivered to Kafka at {KAFKA}")
+    from confluent_kafka import Consumer
     consumer = Consumer(kafka_config(**{"group.id": os.getenv("KAFKA_GROUP", "flood-detector"), "auto.offset.reset": "earliest"}))
     consumer.subscribe([KAFKA_TOPIC])
-    msg = None
-    for _ in range(30):
+    waiting, deadline = set(published), time.time() + 60
+    while waiting and time.time() < deadline:
         msg = consumer.poll(1.0)
-        if msg and not msg.error() and json.loads(msg.value()).get("id") == reading["id"]:
-            break
+        if msg is None or msg.error():
+            continue
+        r = json.loads(msg.value())
+        save_reading(r["source"], r["station"], r["level_m"], r["time"])
+        waiting.discard(r.get("id"))
     consumer.close()
-    if not msg or msg.error() or json.loads(msg.value()).get("id") != reading["id"]:
-        raise RuntimeError(f"the reading did not arrive on Kafka topic {KAFKA_TOPIC} at {KAFKA} within 30 s")
-    r = json.loads(msg.value())
-    save_reading(r["source"], r["station"], r["level_m"], r["time"])
-    return f"{r['station']} {r['level_m']} m OD Malin ({r['source']}) via MQTT -> Kafka -> readings"
+    if waiting:
+        raise RuntimeError(f"{len(waiting)} of {len(published)} readings did not come back from Kafka topic {KAFKA_TOPIC} within 60 s")
+    return f"{len(published)} readings via Kafka {KAFKA_TOPIC} -> readings"
 
 
 # ---------------- the check ----------------
@@ -381,7 +395,7 @@ if __name__ == "__main__":
     setup_db()
     for load in (load_opw, load_tides, load_warnings, load_forecast, load_gtfs, load_gtfsr,
                  load_nodes, load_river, load_coast, load_icwws, load_lidar, load_osm,
-                 load_small_areas, load_saps, sensor_hop):
+                 load_small_areas, load_saps, detect):
         load()
     failed = [n for n, s in status.items() if s.startswith("FAIL")]
     if failed:

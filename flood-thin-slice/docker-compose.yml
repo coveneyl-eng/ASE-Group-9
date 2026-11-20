@@ -6,10 +6,6 @@ services:
       POSTGRES_PASSWORD: flood
       POSTGRES_DB: flood
     ports: ["5432:5432"]
-  mosquitto:
-    image: eclipse-mosquitto:2
-    command: mosquitto -c /mosquitto-no-auth.conf
-    ports: ["1883:1883"]
   kafka:
     image: apache/kafka:3.8.0               # single-node KRaft, PLAINTEXT on localhost:9092
     ports: ["9092:9092"]

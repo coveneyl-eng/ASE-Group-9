@@ -4,7 +4,6 @@ psycopg[binary]
 sqlalchemy
 geoalchemy2
 requests
-paho-mqtt>=2
 confluent-kafka
 rasterio
 pandas
