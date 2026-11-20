@@ -53,8 +53,9 @@ class Tap:
     """Kafka consumer subscribed to every topic before the test traffic is sent."""
 
     def __init__(self):
+        bus.ensure_topics(WATCH)
         self.c = Consumer({**bus._base_conf(), "group.id": f"verify-{uuid.uuid4().hex[:8]}",
-                           "auto.offset.reset": "latest"})
+                           "auto.offset.reset": "latest", "topic.metadata.refresh.interval.ms": 10000})
         self.c.subscribe(WATCH)
         self.seen: list[tuple[str, dict, float]] = []
         deadline = time.time() + 20

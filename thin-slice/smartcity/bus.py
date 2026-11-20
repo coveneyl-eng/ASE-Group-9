@@ -5,7 +5,8 @@ import signal
 import threading
 from collections.abc import Callable
 
-from confluent_kafka import Consumer, KafkaError, Producer
+from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
+from confluent_kafka.admin import AdminClient, NewTopic
 from pydantic import BaseModel
 
 from smartcity import config
@@ -29,6 +30,25 @@ def _base_conf() -> dict:
     return conf
 
 
+def ensure_topics(topics: list[str]) -> None:
+    """Create any missing topics (idempotent). A consumer that subscribes before a topic exists only notices it
+    on its next metadata refresh, so every agent creates its topics up front instead of waiting for a producer."""
+    admin = AdminClient(_base_conf())
+    existing = set(admin.list_topics(timeout=10).topics)
+    missing = [t for t in topics if t not in existing]
+    if not missing:
+        return
+    futures = admin.create_topics([NewTopic(t, num_partitions=1, replication_factor=config.KAFKA_REPLICATION)
+                                   for t in missing])
+    for topic, fut in futures.items():
+        try:
+            fut.result(10)
+            log.info("created topic %s", topic)
+        except KafkaException as exc:
+            if exc.args[0].code() != KafkaError.TOPIC_ALREADY_EXISTS:  # another agent may have just made it
+                raise
+
+
 class Publisher:
     def __init__(self):
         self._producer = Producer({**_base_conf(), "linger.ms": 5, "acks": "all"})
@@ -49,8 +69,9 @@ def consume(group_id: str, topics: list[str], handler: Callable[[str, BaseModel]
     terminated = threading.Event()
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGTERM, lambda *_: terminated.set())
+    ensure_topics(topics)
     consumer = Consumer({**_base_conf(), "group.id": group_id, "auto.offset.reset": "latest",
-                         "enable.auto.commit": True})
+                         "enable.auto.commit": True, "topic.metadata.refresh.interval.ms": 10000})
     consumer.subscribe(topics)
     try:
         while not stop() and not terminated.is_set():
