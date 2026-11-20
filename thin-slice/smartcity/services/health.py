@@ -95,7 +95,7 @@ def keyvault_probe():
     if not config.KEY_VAULT_URL:
         return "skipped", "KEY_VAULT_URL not set (secrets from environment)"
     from smartcity import secrets
-    secrets.get_secret("jwt-signing-key", config.JWT_SECRET)
+    secrets.check("jwt-signing-key", config.JWT_SECRET)  # strict: the services' dev fallback must not look green
     return "ok", "JWT signing key readable"
 
 
