@@ -1,0 +1,30 @@
+# AKS deployment pattern for one agent; the other agents follow the same template (iteration 1 task).
+# Two replicas on different zones, Prometheus scrape annotations, secrets from Key Vault via workload identity.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flood-detector
+  labels: {app: flood-detector, tier: agent}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: flood-detector}}
+  template:
+    metadata:
+      labels: {app: flood-detector, azure.workload.identity/use: "true"}
+      annotations: {prometheus.io/scrape: "true", prometheus.io/port: "9464"}
+    spec:
+      serviceAccountName: smartcity-agents
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app: flood-detector}}
+      containers:
+        - name: agent
+          image: ase9smartcityacr.azurecr.io/smartcity/agents:latest
+          command: ["python", "-m", "smartcity.agents.flood_detector"]
+          envFrom: [{configMapRef: {name: smartcity-config}}]
+          ports: [{containerPort: 9464, name: metrics}]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 256Mi}

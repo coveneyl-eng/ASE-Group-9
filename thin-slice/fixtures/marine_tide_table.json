@@ -1,0 +1,36 @@
+{
+ "columnNames": [
+  "time",
+  "station_id",
+  "latitude",
+  "longitude",
+  "Water_Level_OD_Malin",
+  "QC_Flag"
+ ],
+ "columnTypes": [
+  "String",
+  "String",
+  "double",
+  "double",
+  "double",
+  "String"
+ ],
+ "rows": [
+  [
+   "2026-11-16T14:55:00Z",
+   "Dublin Port",
+   53.3457,
+   -6.2217,
+   1.84,
+   "1"
+  ],
+  [
+   "2026-11-16T15:00:00Z",
+   "Dublin Port",
+   53.3457,
+   -6.2217,
+   1.91,
+   "1"
+  ]
+ ]
+}

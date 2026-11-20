@@ -1,0 +1,71 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "id": 1,
+   "properties": {
+    "station_ref": "0000009102",
+    "station_name": "Anglesea Road",
+    "sensor_ref": "0001",
+    "region_id": 10,
+    "datetime": "2026-11-16T15:00:00Z",
+    "value": "0.612",
+    "err_code": 99,
+    "url": "/0000009102/0001/",
+    "csv_file": "/data/month/09102_0001.csv"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -6.229,
+     53.327
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "id": 2,
+   "properties": {
+    "station_ref": "0000009104",
+    "station_name": "Waldron's Bridge",
+    "sensor_ref": "0001",
+    "region_id": 10,
+    "datetime": "2026-11-16T15:00:00Z",
+    "value": "0.455",
+    "err_code": 99,
+    "url": "/0000009104/0001/",
+    "csv_file": "/data/month/09104_0001.csv"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -6.2627,
+     53.3135
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "id": 3,
+   "properties": {
+    "station_ref": "0000001041",
+    "station_name": "Sandy Mills",
+    "sensor_ref": "0001",
+    "region_id": 3,
+    "datetime": "2026-11-16T05:30:00Z",
+    "value": "0.319",
+    "err_code": 99,
+    "url": "/0000001041/0001/",
+    "csv_file": "/data/month/01041_0001.csv"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -7.575758,
+     54.838318
+    ]
+   }
+  }
+ ]
+}
