@@ -1,0 +1,31 @@
+# Adds the dashboard to flood-thin-slice/docker-compose.yml without editing that file.
+#
+#   docker compose -f flood-thin-slice/docker-compose.yml -f dashboard/docker-compose.dashboard.yml up -d --build
+#
+# Kafka in the base file only advertises localhost:9092, which a container cannot reach.
+# This override keeps localhost:9092 for load_all.py on your laptop and adds an internal
+# listener (kafka:29092) for the dashboard container. Everything else is unchanged.
+services:
+  kafka:
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,INTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+  dashboard:
+    build: ../dashboard          # relative to flood-thin-slice/, the first compose file
+    environment:
+      DB_URL: postgresql+psycopg://flood:flood@db:5432/flood
+      KAFKA: kafka:29092
+    ports: ["8080:8080"]
+    depends_on: [db, kafka]
+    restart: unless-stopped
