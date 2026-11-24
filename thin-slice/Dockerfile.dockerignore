@@ -1,9 +1,0 @@
-# Paths are relative to the build context (the repo root)
-**/.venv
-**/__pycache__
-**/node_modules
-thin-slice/portal/dist
-**/.env
-**/token.json
-**/client_secret*.json
-flood-thin-slice/data
