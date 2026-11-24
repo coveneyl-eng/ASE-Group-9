@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<weatherdata xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" created="2026-11-16T15:00:00Z">
-  <product class="pointData">
-    <time datatype="forecast" from="2026-11-16T15:00:00Z" to="2026-11-16T16:00:00Z"><location altitude="9" latitude="53.3500" longitude="-6.2600"><precipitation unit="mm" value="4.2" minvalue="3.1" maxvalue="5.0" probability="90"/></location></time>
-    <time datatype="forecast" from="2026-11-16T16:00:00Z" to="2026-11-16T17:00:00Z"><location altitude="9" latitude="53.3500" longitude="-6.2600"><precipitation unit="mm" value="6.8" minvalue="5.0" maxvalue="8.1" probability="90"/></location></time>
-    <time datatype="forecast" from="2026-11-16T17:00:00Z" to="2026-11-16T18:00:00Z"><location altitude="9" latitude="53.3500" longitude="-6.2600"><precipitation unit="mm" value="5.1" minvalue="4.0" maxvalue="6.2" probability="80"/></location></time>
-  </product>
-</weatherdata>
