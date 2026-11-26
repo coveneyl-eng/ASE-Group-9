@@ -1,5 +1,5 @@
 # Flood thin slice dashboard: React build + FastAPI in one image, served on :8080.
-FROM node:22-slim AS web
+FROM node:25-slim AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
