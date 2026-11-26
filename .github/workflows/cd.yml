@@ -1,4 +1,4 @@
-# Continuous delivery: after main changes, build the thin-slice image and publish it to GitHub Container Registry.
+# Continuous delivery: after main changes, build the thin-slice and dashboard images and publish them to GitHub Container Registry.
 name: CD
 
 on:
@@ -10,18 +10,23 @@ concurrency:
   group: cd-main
   cancel-in-progress: false
 
-env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/thin-slice
-
 jobs:
   publish:
-    name: Build and publish image
+    name: Publish ${{ matrix.name }} image
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    outputs:
-      tag: ${{ steps.meta.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: thin-slice
+            context: .
+            file: flood-thin-slice/Dockerfile
+          - name: flood-dashboard
+            context: dashboard
+            file: dashboard/Dockerfile
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -33,27 +38,27 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE }}
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
           tags: |
             type=raw,value=latest
             type=sha,format=short
       - uses: docker/build-push-action@v6
         with:
-          context: .
-          file: flood-thin-slice/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
   deploy-azure:
     name: Deploy to Azure (optional)
     needs: publish
     if: ${{ vars.AZURE_DEPLOY == 'true' }}
     runs-on: ubuntu-latest
-    environment: azure          # add required reviewers on this environment for a manual approval step
+    environment: azure
     permissions:
       id-token: write
       contents: read
@@ -68,4 +73,4 @@ jobs:
           az containerapp job update \
             --name "${{ vars.AZURE_CONTAINERAPP_JOB }}" \
             --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --image "${{ env.IMAGE }}:latest"
+            --image "ghcr.io/${{ github.repository_owner }}/thin-slice:latest"
