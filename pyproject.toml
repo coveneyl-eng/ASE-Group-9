@@ -1,0 +1,14 @@
+[tool.ruff]
+line-length = 120
+extend-exclude = [".venv", "data"]
+
+[tool.ruff.lint]
+# Correctness checks only (pyflakes, pycodestyle errors and warnings). Style is relaxed to fit the existing code:
+# W291/W292/W293 trailing whitespace and missing final newline (cosmetic; tighten later with ruff format).
+# E401 several imports per line, E701/E702 one-line blocks and semicolons, E731 lambdas, E741 short names.
+select = ["E", "F", "W"]
+ignore = ["W291", "W292", "W293", "E401", "E701", "E702", "E731", "E741", "E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "APIs/notification"]
+pythonpath = ["APIs", "APIs/notification"]
