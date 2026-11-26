@@ -24,6 +24,9 @@ jobs:
           - name: thin-slice
             context: .
             file: flood-thin-slice/Dockerfile
+          - name: flood-agent
+            context: flood-thin-slice/agent
+            file: flood-thin-slice/agent/Dockerfile
           - name: flood-dashboard
             context: dashboard
             file: dashboard/Dockerfile

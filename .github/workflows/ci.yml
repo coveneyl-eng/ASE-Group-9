@@ -41,20 +41,26 @@ jobs:
       - run: pytest
 
   docker-build:
-    name: Docker image builds
+    name: Docker image builds (${{ matrix.name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: thin-slice,      context: ., file: flood-thin-slice/Dockerfile}
+          - {name: flood-agent,     context: flood-thin-slice/agent, file: flood-thin-slice/agent/Dockerfile}
+          - {name: flood-dashboard, context: dashboard, file: dashboard/Dockerfile}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      # Build only, no push: proves the thin-slice image still builds for Azure (linux/amd64).
       - uses: docker/build-push-action@v6
         with:
-          context: .
-          file: flood-thin-slice/Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           platforms: linux/amd64
           push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
   secrets-scan:
     name: Secret scan (gitleaks)

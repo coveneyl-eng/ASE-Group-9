@@ -4,3 +4,6 @@ requests>=2.0,<3.0
 google-api-python-client>=2.0,<3.0
 google-auth>=2.0,<3.0
 google-auth-oauthlib>=1.0,<2.0
+confluent-kafka>=2.0,<3
+sqlalchemy>=2.0,<3
+psycopg[binary]>=3.1,<4
